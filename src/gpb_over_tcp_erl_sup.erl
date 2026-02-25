@@ -14,5 +14,12 @@ init([]) ->
         intensity => 5,
         period    => 10
     },
-    ChildSpecs = [],
-    {ok, {SupFlags, ChildSpecs}}.
+    Listener = #{
+        id       => gpb_tcp_listener,
+        start    => {gpb_tcp_listener, start_link, []},
+        restart  => permanent,
+        shutdown => 5000,
+        type     => worker,
+        modules  => [gpb_tcp_listener]
+    },
+    {ok, {SupFlags, [Listener]}}.
