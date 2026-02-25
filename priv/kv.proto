@@ -1,0 +1,50 @@
+syntax = "proto2";
+
+package kv;
+
+message data {
+    required string key   = 1;
+    required string value = 2;
+}
+
+message set_request {
+    required data payload = 1;
+}
+
+message set_response {
+    enum error {
+        ok       = 1;
+        internal = 2;
+    }
+    required error result = 1;
+}
+
+message get_request {
+    required string key = 1;
+}
+
+message get_response {
+    enum error {
+        ok        = 1;
+        not_found = 2;
+        internal  = 3;
+    }
+    required error  result  = 1;
+    optional data   payload = 2;
+}
+
+message req_envelope {
+    enum msg_type {
+        SET_REQ  = 1;
+        SET_RESP = 2;
+        GET_REQ  = 3;
+        GET_RESP = 4;
+    }
+
+    required msg_type type = 1;
+
+    optional set_request  set_req  = 2;
+    optional set_response set_resp = 3;
+    optional get_request  get_req  = 4;
+    optional get_response get_resp = 5;
+}

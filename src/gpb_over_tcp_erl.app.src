@@ -1,8 +1,8 @@
-{application, gpb-over-tcp-erl, [
-    {description, "An OTP application"},
+{application, gpb_over_tcp_erl, [
+    {description, "Key-value store over TCP using Protocol Buffers and DynamoDB"},
     {vsn, "0.1.0"},
     {registered, []},
-    {mod, {gpb-over-tcp-erl_app, []}},
+    {mod, {gpb_over_tcp_erl_app, []}},
     {applications, [
         kernel,
         stdlib
@@ -11,4 +11,4 @@
     {modules, []},
     {licenses, ["Apache-2.0"]},
     {links, []}
- ]}.
+]}.
