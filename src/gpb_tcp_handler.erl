@@ -53,7 +53,7 @@ terminate(_Reason, #{socket := Socket}) ->
 % A frame is: <<Len:32/big, Payload:Len/binary>>
 %
 % We pattern-match on the 4-byte length prefix first. If the rest of the buffer
-% contains at least Len bytes, we have a complete frame - extract it, decode it,
+% contains at least Len bytes, we have a complete frame -> extract it, decode it,
 % and recurse on whatever is left. If not, we store what we have and wait for
 % more data to arrive.
 parse_frames(<<Len:32/big, Rest/binary>>, State) when byte_size(Rest) >= Len ->

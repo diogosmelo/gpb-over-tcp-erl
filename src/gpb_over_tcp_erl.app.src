@@ -5,7 +5,10 @@
     {mod, {gpb_over_tcp_erl_app, []}},
     {applications, [
         kernel,
-        stdlib
+        stdlib,
+        crypto,     % required by erlcloud for AWS request signing
+        inets,      % provides httpc, erlcloud's HTTP client
+        erlcloud
     ]},
     {env, []},
     {modules, []},

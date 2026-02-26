@@ -14,6 +14,14 @@ init([]) ->
         intensity => 5,
         period    => 10
     },
+    Dynamo = #{
+        id       => gpb_dynamo,
+        start    => {gpb_dynamo, start_link, []},
+        restart  => permanent,
+        shutdown => 5000,
+        type     => worker,
+        modules  => [gpb_dynamo]
+    },
     Listener = #{
         id       => gpb_tcp_listener,
         start    => {gpb_tcp_listener, start_link, []},
@@ -22,4 +30,4 @@ init([]) ->
         type     => worker,
         modules  => [gpb_tcp_listener]
     },
-    {ok, {SupFlags, [Listener]}}.
+    {ok, {SupFlags, [Dynamo, Listener]}}.
