@@ -8,6 +8,9 @@
 
 -include_lib("erlcloud/include/erlcloud_aws.hrl").
 
+% Maximum number of failed delete attempts per item before clear_table gives up.
+-define(MAX_ITEM_RETRIES, 3).
+
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
@@ -94,18 +97,48 @@ terminate(_Reason, _State) ->
     ok.
 
 % Scan all items in the table and delete each one by its key.
-% DynamoDB has no truncate operation - scan + per-item delete is the only way.
+% DynamoDB has no truncate operation: scan + per-item delete is the only way.
+%
+% Retries failed deletes on each subsequent scan pass. FailureCounts tracks
+% how many times each key has failed; once a key hits MAX_ITEM_RETRIES the
+% function gives up and returns an error rather than looping forever.
 do_clear_table(Table, Config) ->
+    do_clear_table(Table, Config, #{}).
+
+do_clear_table(Table, Config, FailureCounts) ->
     case erlcloud_ddb2:scan(Table, [], Config) of
-        {ok, Items} ->
-            lists:foreach(fun(Item) ->
-                Key = proplists:get_value(<<"key">>, Item),
-                erlcloud_ddb2:delete_item(Table, [{<<"key">>, {s, Key}}], [], Config)
-            end, Items),
-            ok;
         {error, Reason} ->
-            {error, Reason}
+            {error, Reason};
+        {ok, []} ->
+            ok;
+        {ok, Items} ->
+            case delete_items(Items, Table, Config, FailureCounts) of
+                {ok, NewCounts}  -> do_clear_table(Table, Config, NewCounts);
+                {error, _} = Err -> Err
+            end
     end.
+
+% Attempt to delete every item in the list, updating the per-key failure count
+% for each one that fails. Returns {ok, NewCounts} so the caller can re-scan
+% and retry, or {error, Reason} if a key has hit MAX_ITEM_RETRIES.
+delete_items(Items, Table, Config, FailureCounts) ->
+    lists:foldl(fun
+        (Item, {ok, Counts}) ->
+            Key = proplists:get_value(<<"key">>, Item),
+            case erlcloud_ddb2:delete_item(Table, [{<<"key">>, {s, Key}}], [], Config) of
+                {ok, _} ->
+                    {ok, maps:remove(Key, Counts)};
+                {error, Reason} ->
+                    NewCount = maps:get(Key, Counts, 0) + 1,
+                    if NewCount >= ?MAX_ITEM_RETRIES ->
+                        {error, {max_retries_exceeded, Key, Reason}};
+                    true ->
+                        {ok, Counts#{Key => NewCount}}
+                    end
+            end;
+        (_Item, Error) ->
+            Error
+    end, {ok, FailureCounts}, Items).
 
 ensure_table(Table, Config) ->
     case erlcloud_ddb2:describe_table(Table, [], Config) of
