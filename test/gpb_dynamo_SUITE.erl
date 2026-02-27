@@ -18,10 +18,11 @@ end_per_suite(_Config) ->
     ok.
 
 set_and_get(_Config) ->
-    Key   = <<"test-key-1">>,
-    Value = <<"hello-dynamo">>,
-    ok          = gpb_dynamo:set(Key, Value),
-    {ok, Value} = gpb_dynamo:get(Key).
+    Key     = <<"test-key-1">>,
+    EncBlob = <<"fake-encrypted-blob">>,
+    EncKey  = <<"fake-encrypted-key">>,
+    ok                      = gpb_dynamo:set(Key, EncBlob, EncKey),
+    {ok, {EncBlob, EncKey}} = gpb_dynamo:get(Key).
 
 get_missing_key(_Config) ->
     {error, not_found} = gpb_dynamo:get(<<"no-such-key">>).

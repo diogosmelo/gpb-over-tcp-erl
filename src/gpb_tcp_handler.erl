@@ -2,8 +2,12 @@
 
 -behaviour(gen_server).
 
+-include("kv_pb.hrl").
+
 -export([start/1, activate/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+
+-define(MAX_VIOLATIONS, 3).
 
 start(Socket) ->
     gen_server:start(?MODULE, [Socket], []).
@@ -11,12 +15,9 @@ start(Socket) ->
 activate(Pid) ->
     gen_server:cast(Pid, activate).
 
-
 init([Socket]) ->
-    % buffer accumulates bytes across TCP deliveries until we have a complete frame.
-    % A single {tcp, Socket, Data} message may contain a partial frame, a full frame,
-    % or multiple frames — the buffer absorbs that uncertainty.
-    {ok, #{socket => Socket, buffer => <<>>}}.
+    % buffer: accumulates bytes across TCP deliveries until we have a complete frame.
+    {ok, #{socket => Socket, buffer => <<>>, violations => 0}}.
 
 handle_cast(activate, State = #{socket := Socket}) ->
     ok = inet:setopts(Socket, [{active, once}]),
@@ -26,9 +27,15 @@ handle_cast(_Msg, State) ->
 
 handle_info({tcp, Socket, Data}, State = #{socket := Socket, buffer := Buffer}) ->
     NewBuffer = <<Buffer/binary, Data/binary>>,
-    NewState = parse_frames(NewBuffer, State),
-    ok = inet:setopts(Socket, [{active, once}]),
-    {noreply, NewState};
+    NewState  = parse_frames(NewBuffer, State),
+    case NewState of
+        #{violations := V} when V >= ?MAX_VIOLATIONS ->
+            io:format("[handler ~p] too many violations (~p), closing connection~n", [self(), V]),
+            {stop, normal, NewState};
+        _ ->
+            ok = inet:setopts(Socket, [{active, once}]),
+            {noreply, NewState}
+    end;
 
 handle_info({tcp_closed, Socket}, State = #{socket := Socket}) ->
     io:format("[handler ~p] connection closed~n", [self()]),
@@ -56,18 +63,58 @@ terminate(_Reason, #{socket := Socket}) ->
 % contains at least Len bytes, we have a complete frame -> extract it, decode it,
 % and recurse on whatever is left. If not, we store what we have and wait for
 % more data to arrive.
+% 
+% We stop early if violations hit the limit mid-batch, so bad frames in a single
+% TCP delivery do not process frames that follow them.
 parse_frames(<<Len:32/big, Rest/binary>>, State) when byte_size(Rest) >= Len ->
     <<Payload:Len/binary, Remaining/binary>> = Rest,
-    decode_and_log(Payload),
-    parse_frames(Remaining, State#{buffer => Remaining});
+    NewState = dispatch(Payload, State),
+    case NewState of
+        #{violations := V} when V >= ?MAX_VIOLATIONS ->
+            NewState#{buffer => Remaining};
+        _ ->
+            parse_frames(Remaining, NewState#{buffer => Remaining})
+    end;
 parse_frames(Incomplete, State) ->
     State#{buffer => Incomplete}.
 
-decode_and_log(Payload) ->
+% Decode a GPB frame and dispatch to the appropriate handler.
+dispatch(Payload, State = #{socket := Socket}) ->
     try kv_pb:decode_msg(Payload, req_envelope) of
-        Msg ->
-            io:format("[handler ~p] decoded message: ~p~n", [self(), Msg])
+        #req_envelope{type = 'SET_REQ', set_req = #set_request{payload = #data{key = Key, value = Value}}} ->
+            handle_set(Key, Value, Socket),
+            State;
+        #req_envelope{type = 'GET_REQ', get_req = #get_request{key = Key}} ->
+            handle_get(Key, Socket),
+            State;
+        #req_envelope{type = Type} ->
+            io:format("[handler ~p] unexpected message type: ~p~n", [self(), Type]),
+            bump_violations(State)
     catch
         error:Reason ->
-            io:format("[handler ~p] decode error: ~p~n", [self(), Reason])
+            io:format("[handler ~p] decode error: ~p~n", [self(), Reason]),
+            bump_violations(State)
     end.
+
+bump_violations(State = #{violations := V}) ->
+    State#{violations => V + 1}.
+
+handle_set(Key, Value, Socket) ->
+    SetResp = case gpb_kv:set(Key, Value) of
+        ok         -> #set_response{result = ok};
+        {error, _} -> #set_response{result = internal}
+    end,
+    send_response(#req_envelope{type = 'SET_RESP', set_resp = SetResp}, Socket).
+
+handle_get(Key, Socket) ->
+    GetResp = case gpb_kv:get(Key) of
+        {ok, Value}        -> #get_response{result = ok,        payload = #data{key = Key, value = Value}};
+        {error, not_found} -> #get_response{result = not_found};
+        {error, _}         -> #get_response{result = internal}
+    end,
+    send_response(#req_envelope{type = 'GET_RESP', get_resp = GetResp}, Socket).
+
+send_response(Envelope, Socket) ->
+    Payload = kv_pb:encode_msg(Envelope),
+    Frame   = <<(byte_size(Payload)):32/big, Payload/binary>>,
+    gen_tcp:send(Socket, Frame).
