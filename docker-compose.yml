@@ -4,3 +4,10 @@ services:
     ports:
       - '8000:8000'
     command: '-jar DynamoDBLocal.jar -sharedDb -inMemory'
+
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - '4566:4566'
+    environment:
+      - SERVICES=kms

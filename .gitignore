@@ -20,4 +20,5 @@ rebar3.crashdump
 *~
 
 .env
+.localstack.env
 config/sys.config
