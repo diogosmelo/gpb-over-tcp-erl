@@ -13,7 +13,7 @@ encrypt(Value) when is_binary(Value) ->
         "AWS_SECRET_ACCESS_KEY",
         "AWS_DEFAULT_REGION"
     ],
-    case read_env(Required) of
+    case gpb_env:read_env(Required) of
         {error, Reason} ->
             {error, Reason};
         {ok, Env} ->
@@ -39,7 +39,7 @@ decrypt(EncryptedBlob, EncryptedDataKey)
         "AWS_SECRET_ACCESS_KEY",
         "AWS_DEFAULT_REGION"
     ],
-    case read_env(Required) of
+    case gpb_env:read_env(Required) of
         {error, Reason} ->
             {error, Reason};
         {ok, Env} ->
@@ -99,19 +99,8 @@ aes_gcm_decrypt(<<IV:12/binary, Tag:16/binary, Ciphertext/binary>>, Key) ->
         false  
     ).
 
-read_env(Vars) ->
-    read_env(Vars, #{}).
-
-read_env([], Acc) ->
-    {ok, Acc};
-read_env([Var | Rest], Acc) ->
-    case os:getenv(Var) of
-        false -> {error, {missing_env, Var}};
-        Value -> read_env(Rest, Acc#{Var => Value})
-    end.
-
 build_config(Env) ->
-    {Scheme, Host, Port} = parse_endpoint(maps:get("KMS_ENDPOINT", Env)),
+    {Scheme, Host, Port} = gpb_env:parse_endpoint(maps:get("KMS_ENDPOINT", Env)),
     #aws_config{
         access_key_id     = maps:get("AWS_ACCESS_KEY_ID",     Env),
         secret_access_key = maps:get("AWS_SECRET_ACCESS_KEY", Env),
@@ -120,13 +109,3 @@ build_config(Env) ->
         kms_scheme        = Scheme
     }.
 
-parse_endpoint(Url) ->
-    Map    = uri_string:parse(Url),
-    Scheme = maps:get(scheme, Map),
-    Host   = maps:get(host, Map),
-    Port   = maps:get(port, Map, default_port(Scheme)),
-    % aws_config expects the scheme with the "://" suffix included.
-    {Scheme ++ "://", Host, Port}.
-
-default_port("https") -> 443;
-default_port("http")  -> 80.
