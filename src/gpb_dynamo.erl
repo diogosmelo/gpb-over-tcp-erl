@@ -144,9 +144,13 @@ ensure_table(Table, Config) ->
     case erlcloud_ddb2:describe_table(Table, [], Config) of
         {ok, _} ->
             ok;
-        {error, _} ->
+        {error, {<<"ResourceNotFoundException">>, _}} ->
             AttrDefs = [{<<"key">>, s}],
             KeySchema = <<"key">>,
-            {ok, _} = erlcloud_ddb2:create_table(Table, AttrDefs, KeySchema, 5, 5, [], Config),
-            ok
+            case erlcloud_ddb2:create_table(Table, AttrDefs, KeySchema, 5, 5, [], Config) of
+                {ok, _}         -> ok;
+                {error, Reason} -> {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
     end.
