@@ -1,4 +1,4 @@
-.PHONY: compile shell clean telnet test docker-up docker-down
+.PHONY: compile shell clean telnet test docker-up docker-down release cfn-deploy cfn-delete cfn-status cfn-outputs
 
 compile:
 	rebar3 compile
@@ -41,3 +41,35 @@ docker-up:
 
 docker-down:
 	docker compose down
+
+# Build a production release (self-contained, bundles ERTS).
+release:
+	rebar3 as prod release
+
+# Deploy the CloudFormation stack. Requires AWS CLI configured.
+# Usage: make cfn-deploy VPC_ID=vpc-xxx SUBNET_ID=subnet-xxx KEY_PAIR=my-key EMAIL=me@example.com
+cfn-deploy:
+	aws cloudformation deploy \
+		--template-file cfn/gpb-over-tcp-erl.yaml \
+		--stack-name gpb-over-tcp-erl \
+		--capabilities CAPABILITY_IAM \
+		--parameter-overrides \
+			VpcId=$(VPC_ID) \
+			SubnetId=$(SUBNET_ID) \
+			KeyPairName=$(KEY_PAIR) \
+			NotificationEmail=$(EMAIL)
+
+# Delete the CloudFormation stack and all its resources.
+cfn-delete:
+	aws cloudformation delete-stack --stack-name gpb-over-tcp-erl
+	@echo "Stack deletion initiated. Run 'make cfn-status' to track progress."
+
+# Show the current stack status.
+cfn-status:
+	aws cloudformation describe-stacks --stack-name gpb-over-tcp-erl \
+		--query 'Stacks[0].StackStatus' --output text
+
+# Show stack outputs (public IP, SSH command, service endpoint).
+cfn-outputs:
+	aws cloudformation describe-stacks --stack-name gpb-over-tcp-erl \
+		--query 'Stacks[0].Outputs' --output table

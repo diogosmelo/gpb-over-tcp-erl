@@ -1,0 +1,327 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  GPB over TCP Erlang service - key-value store over TCP with GPB wire format,
+  backed by DynamoDB with KMS envelope encryption.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy into
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet for the EC2 instance (must have an internet gateway route)
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 key pair name for SSH access
+
+  TcpPort:
+    Type: Number
+    Default: 1337
+    Description: TCP port for the GPB service
+
+  NotificationEmail:
+    Type: String
+    Description: Email address for budget billing alerts
+
+  BudgetThreshold:
+    Type: Number
+    Default: 1
+    Description: Monthly budget threshold in USD - instance is auto-stopped when breached
+
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: AMI ID (defaults to latest Amazon Linux 2023)
+
+Resources:
+  KmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Description: Envelope encryption key for gpb-over-tcp-erl
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIamPolicies
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+
+  DynamoTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: gpb-kv-store
+      AttributeDefinitions:
+        - AttributeName: key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: key
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 10
+        WriteCapacityUnits: 10
+      # SSE disabled: the app already does client-side envelope encryption via
+      # KMS before writing to DynamoDB.
+      SSESpecification:
+        SSEEnabled: false
+
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+
+  Ec2RolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: gpb-dynamo-kms-access
+      Roles:
+        - Ref: Ec2Role
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DynamoDbAccess
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+              - dynamodb:GetItem
+              - dynamodb:DeleteItem
+              - dynamodb:Scan
+              - dynamodb:DescribeTable
+              - dynamodb:CreateTable
+            Resource:
+              Fn::GetAtt: [DynamoTable, Arn]
+          - Sid: KmsAccess
+            Effect: Allow
+            Action:
+              - kms:GenerateDataKey
+              - kms:Decrypt
+            Resource:
+              Fn::GetAtt: [KmsKey, Arn]
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - Ref: Ec2Role
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: gpb-over-tcp-erl - allow service port and SSH
+      VpcId:
+        Ref: VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort:
+            Ref: TcpPort
+          ToPort:
+            Ref: TcpPort
+          CidrIp: 0.0.0.0/0
+          Description: GPB service port
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH access (key-pair auth only)
+
+  Ec2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: Ec2RolePolicy
+    Properties:
+      InstanceType: t2.micro
+      ImageId:
+        Ref: AmiId
+      KeyName:
+        Ref: KeyPairName
+      IamInstanceProfile:
+        Ref: Ec2InstanceProfile
+      SubnetId:
+        Ref: SubnetId
+      SecurityGroupIds:
+        - Ref: SecurityGroup
+      MetadataOptions:
+        HttpTokens: optional
+        HttpEndpoint: enabled
+      Tags:
+        - Key: Name
+          Value: gpb-over-tcp-erl
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash
+            set -euxo pipefail
+
+            # --- Install Erlang and git ---
+            # AL2023 may or may not have erlang in its default repos.
+            # Try dnf first; fall back to the Erlang Solutions repo.
+            dnf install -y git
+            dnf install -y erlang || {
+              dnf install -y https://packages.erlang-solutions.com/erlang-solutions-2.0-1.noarch.rpm
+              dnf install -y erlang
+            }
+
+            # --- Install rebar3 (Erlang build tool) ---
+            curl -fSL -o /usr/local/bin/rebar3 https://s3.amazonaws.com/rebar3/rebar3
+            chmod +x /usr/local/bin/rebar3
+
+            # --- Clone and build a production release ---
+            cd /opt
+            git clone https://github.com/diogosmelo/gpb-over-tcp-erl.git
+            cd gpb-over-tcp-erl
+            rebar3 as prod release
+
+            # --- Environment file ---
+            cat > /opt/gpb-over-tcp-erl/.env.prod <<'ENVEOF'
+            DYNAMO_TABLE=${DynamoTable}
+            AWS_DEFAULT_REGION=${AWS::Region}
+            KMS_KEY_ARN=${KmsKey.Arn}
+            TCP_PORT=${TcpPort}
+            ENVEOF
+
+            # --- systemd unit ---
+            cat > /etc/systemd/system/gpb-over-tcp-erl.service <<'SVCEOF'
+            [Unit]
+            Description=GPB over TCP Erlang Service
+            After=network.target
+
+            [Service]
+            Type=simple
+            WorkingDirectory=/opt/gpb-over-tcp-erl
+            EnvironmentFile=/opt/gpb-over-tcp-erl/.env.prod
+            ExecStart=/opt/gpb-over-tcp-erl/_build/prod/rel/gpb_over_tcp_erl/bin/gpb_over_tcp_erl foreground
+            Restart=on-failure
+
+            [Install]
+            WantedBy=multi-user.target
+            SVCEOF
+
+            systemctl daemon-reload
+            systemctl enable gpb-over-tcp-erl
+            systemctl start gpb-over-tcp-erl
+
+  BudgetSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: gpb-over-tcp-erl-budget-alerts
+      KmsMasterKeyId: alias/aws/sns
+
+  BudgetSnsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn:
+        Ref: BudgetSnsTopic
+      Protocol: email
+      Endpoint:
+        Ref: NotificationEmail
+
+  BudgetActionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: budgets.amazonaws.com
+            Action: sts:AssumeRole
+
+  BudgetActionRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: budget-stop-ec2
+      Roles:
+        - Ref: BudgetActionRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - ec2:StopInstances
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Ec2Instance}
+          - Effect: Allow
+            Action:
+              - ssm:StartAutomationExecution
+              - ssm:GetAutomationExecution
+            Resource: '*'
+
+  Budget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: gpb-over-tcp-erl-budget
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount:
+            Ref: BudgetThreshold
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address:
+                Ref: NotificationEmail
+
+  BudgetAction:
+    Type: AWS::Budgets::BudgetsAction
+    Properties:
+      BudgetName:
+        Ref: Budget
+      ActionType: RUN_SSM_DOCUMENTS
+      ActionThreshold:
+        Type: PERCENTAGE
+        Value: 100
+      Definition:
+        SsmActionDefinition:
+          Subtype: STOP_EC2_INSTANCES
+          Region:
+            Ref: AWS::Region
+          InstanceIds:
+            - Ref: Ec2Instance
+      ExecutionRoleArn:
+        Fn::GetAtt: [BudgetActionRole, Arn]
+      ApprovalModel: AUTOMATIC
+      NotificationType: ACTUAL
+      Subscribers:
+        - Type: EMAIL
+          Address:
+            Ref: NotificationEmail
+
+Outputs:
+  InstancePublicIp:
+    Description: Public IP of the EC2 instance
+    Value:
+      Fn::GetAtt: [Ec2Instance, PublicIp]
+
+  SshCommand:
+    Description: SSH command (assumes .pem file is named after the key pair)
+    Value:
+      Fn::Sub: ssh -i ${KeyPairName}.pem ec2-user@${Ec2Instance.PublicIp}
+
+  ServiceEndpoint:
+    Description: TCP endpoint for the GPB service
+    Value:
+      Fn::Sub: ${Ec2Instance.PublicIp}:${TcpPort}
+
+  KmsKeyArn:
+    Description: ARN of the KMS key used for envelope encryption
+    Value:
+      Fn::GetAtt: [KmsKey, Arn]
