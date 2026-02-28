@@ -8,6 +8,7 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(MAX_VIOLATIONS, 3).
+-define(MAX_FRAME_SIZE, 1048576). % 1 MB
 
 start(Socket) ->
     gen_server:start(?MODULE, [Socket], []).
@@ -77,6 +78,9 @@ log_stop_reason(#{should_stop := true}) ->
 % 
 % We stop early if violations hit the limit mid-batch, so bad frames in a single
 % TCP delivery do not process frames that follow them.
+parse_frames(<<Len:32/big, _/binary>>, State) when Len > ?MAX_FRAME_SIZE ->
+    io:format("[handler ~p] frame too large: ~p bytes, closing~n", [self(), Len]),
+    State#{should_stop => true, buffer => <<>>};
 parse_frames(<<Len:32/big, Rest/binary>>, State) when byte_size(Rest) >= Len ->
     <<Payload:Len/binary, Remaining/binary>> = Rest,
     NewState = dispatch(Payload, State),
