@@ -29,9 +29,14 @@ init([]) ->
 handle_info(accept, State = #{listen := Listen}) ->
     case gen_tcp:accept(Listen, 1000) of
         {ok, Socket} ->
-            {ok, Pid} = gpb_tcp_handler:start(Socket),
-            ok = gen_tcp:controlling_process(Socket, Pid),
-            gpb_tcp_handler:activate(Pid),
+            case gpb_tcp_handler:start(Socket) of
+                {ok, Pid} ->
+                    ok = gen_tcp:controlling_process(Socket, Pid),
+                    gpb_tcp_handler:activate(Pid);
+                {error, Reason} ->
+                    io:format("[listener] failed to start handler: ~p~n", [Reason]),
+                    gen_tcp:close(Socket)
+            end,
             self() ! accept,
             {noreply, State};
         {error, timeout} ->
