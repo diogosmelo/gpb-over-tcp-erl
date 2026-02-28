@@ -30,27 +30,33 @@ clear_table() ->
     gen_server:call(?MODULE, clear_table).
 
 init([]) ->
-    Required = [
-        "DYNAMO_TABLE",
-        "DYNAMO_ENDPOINT",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_DEFAULT_REGION"
-    ],
+    Required = ["DYNAMO_TABLE", "AWS_DEFAULT_REGION"],
     case gpb_env:read_env(Required) of
         {error, Reason} ->
             {stop, Reason};
         {ok, Env} ->
-            {Scheme, Host, Port} = gpb_env:parse_endpoint(maps:get("DYNAMO_ENDPOINT", Env)),
-            Config = #aws_config{
-                access_key_id     = maps:get("AWS_ACCESS_KEY_ID", Env),
-                secret_access_key = maps:get("AWS_SECRET_ACCESS_KEY", Env),
-                ddb_host          = Host,
-                ddb_port          = Port,
-                ddb_scheme        = Scheme
-            },
-            Table = list_to_binary(maps:get("DYNAMO_TABLE", Env)),
-            {ok, #{table => Table, config => Config}}
+            Table  = list_to_binary(maps:get("DYNAMO_TABLE", Env)),
+            Region = maps:get("AWS_DEFAULT_REGION", Env),
+            case build_config(Region) of
+                {error, Reason} -> {stop, Reason};
+                {ok, Config}    -> {ok, #{table => Table, config => Config}}
+            end
+    end.
+
+build_config(Region) ->
+    case gpb_env:base_aws_config() of
+        {error, Reason} ->
+            {error, Reason};
+        {ok, Base} ->
+            Config = case gpb_env:read_env_optional("DYNAMO_ENDPOINT") of
+                undefined ->
+                    Host = "dynamodb." ++ Region ++ ".amazonaws.com",
+                    Base#aws_config{ddb_host = Host, ddb_port = 443, ddb_scheme = "https://"};
+                Endpoint ->
+                    {Scheme, Host, Port} = gpb_env:parse_endpoint(Endpoint),
+                    Base#aws_config{ddb_host = Host, ddb_port = Port, ddb_scheme = Scheme}
+            end,
+            {ok, Config}
     end.
 
 handle_call({set, Key, EncBlob, EncKey}, _From, State = #{table := Table, config := Config}) ->

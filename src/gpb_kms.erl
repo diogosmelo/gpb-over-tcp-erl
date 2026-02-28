@@ -6,52 +6,51 @@
 
 %% Encrypts Value using envelope encryption with AWS KMS (Key Management Service).
 encrypt(Value) when is_binary(Value) ->
-    Required = [
-        "KMS_ENDPOINT",
-        "KMS_KEY_ARN",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_DEFAULT_REGION"
-    ],
+    Required = ["KMS_KEY_ARN", "AWS_DEFAULT_REGION"],
     case gpb_env:read_env(Required) of
         {error, Reason} ->
             {error, Reason};
         {ok, Env} ->
-            Config = build_config(Env),
-            KeyArn = list_to_binary(maps:get("KMS_KEY_ARN", Env)),
-            case erlcloud_kms:generate_data_key(KeyArn, [{key_spec, <<"AES_256">>}], Config) of
+            Region = maps:get("AWS_DEFAULT_REGION", Env),
+            case build_config(Region) of
                 {error, Reason} ->
                     {error, Reason};
-                {ok, Response} ->
-                    PlaintextKey     = base64:decode(proplists:get_value(<<"Plaintext">>,     Response)),
-                    EncryptedDataKey = base64:decode(proplists:get_value(<<"CiphertextBlob">>, Response)),
-                    EncryptedBlob    = aes_gcm_encrypt(Value, PlaintextKey),
-                    {ok, {EncryptedBlob, EncryptedDataKey}}
+                {ok, Config} ->
+                    KeyArn = list_to_binary(maps:get("KMS_KEY_ARN", Env)),
+                    case erlcloud_kms:generate_data_key(KeyArn, [{key_spec, <<"AES_256">>}], Config) of
+                        {error, Reason} ->
+                            {error, Reason};
+                        {ok, Response} ->
+                            PlaintextKey     = base64:decode(proplists:get_value(<<"Plaintext">>,     Response)),
+                            EncryptedDataKey = base64:decode(proplists:get_value(<<"CiphertextBlob">>, Response)),
+                            EncryptedBlob    = aes_gcm_encrypt(Value, PlaintextKey),
+                            {ok, {EncryptedBlob, EncryptedDataKey}}
+                    end
             end
     end.
 
 %% Decrypts an encrypted blob produced by encrypt/1, using the provided encrypted data key.
 decrypt(EncryptedBlob, EncryptedDataKey)
         when is_binary(EncryptedBlob), is_binary(EncryptedDataKey) ->
-    Required = [
-        "KMS_ENDPOINT",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_DEFAULT_REGION"
-    ],
+    Required = ["AWS_DEFAULT_REGION"],
     case gpb_env:read_env(Required) of
         {error, Reason} ->
             {error, Reason};
         {ok, Env} ->
-            Config = build_config(Env),
-            case erlcloud_kms:decrypt(base64:encode(EncryptedDataKey), [], Config) of
+            Region = maps:get("AWS_DEFAULT_REGION", Env),
+            case build_config(Region) of
                 {error, Reason} ->
                     {error, Reason};
-                {ok, Response} ->
-                    PlaintextKey = base64:decode(proplists:get_value(<<"Plaintext">>, Response)),
-                    case aes_gcm_decrypt(EncryptedBlob, PlaintextKey) of
-                        error     -> {error, decryption_failed};
-                        Plaintext -> {ok, Plaintext}
+                {ok, Config} ->
+                    case erlcloud_kms:decrypt(base64:encode(EncryptedDataKey), [], Config) of
+                        {error, Reason} ->
+                            {error, Reason};
+                        {ok, Response} ->
+                            PlaintextKey = base64:decode(proplists:get_value(<<"Plaintext">>, Response)),
+                            case aes_gcm_decrypt(EncryptedBlob, PlaintextKey) of
+                                error     -> {error, decryption_failed};
+                                Plaintext -> {ok, Plaintext}
+                            end
                     end
             end
     end.
@@ -99,13 +98,19 @@ aes_gcm_decrypt(<<IV:12/binary, Tag:16/binary, Ciphertext/binary>>, Key) ->
         false  
     ).
 
-build_config(Env) ->
-    {Scheme, Host, Port} = gpb_env:parse_endpoint(maps:get("KMS_ENDPOINT", Env)),
-    #aws_config{
-        access_key_id     = maps:get("AWS_ACCESS_KEY_ID",     Env),
-        secret_access_key = maps:get("AWS_SECRET_ACCESS_KEY", Env),
-        kms_host          = Host,
-        kms_port          = Port,
-        kms_scheme        = Scheme
-    }.
+build_config(Region) ->
+    case gpb_env:base_aws_config() of
+        {error, Reason} ->
+            {error, Reason};
+        {ok, Base} ->
+            Config = case gpb_env:read_env_optional("KMS_ENDPOINT") of
+                undefined ->
+                    Host = "kms." ++ Region ++ ".amazonaws.com",
+                    Base#aws_config{kms_host = Host, kms_port = 443, kms_scheme = "https://"};
+                Endpoint ->
+                    {Scheme, Host, Port} = gpb_env:parse_endpoint(Endpoint),
+                    Base#aws_config{kms_host = Host, kms_port = Port, kms_scheme = Scheme}
+            end,
+            {ok, Config}
+    end.
 
