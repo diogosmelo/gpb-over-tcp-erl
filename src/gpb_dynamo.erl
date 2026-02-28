@@ -7,6 +7,7 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -include_lib("erlcloud/include/erlcloud_aws.hrl").
+-include_lib("erlcloud/include/erlcloud_ddb2.hrl").
 
 % Maximum number of failed delete attempts per item before clear_table gives up.
 -define(MAX_ITEM_RETRIES, 3).
@@ -102,11 +103,15 @@ terminate(_Reason, _State) ->
 % Retries failed deletes on each subsequent scan pass. FailureCounts tracks
 % how many times each key has failed; once a key hits MAX_ITEM_RETRIES the
 % function gives up and returns an error rather than looping forever.
+%
+% scan_all/2 handles DynamoDB pagination: a single Scan call returns at most
+% 1 MB of results. We follow LastEvaluatedKey until it is absent, collecting
+% all items before attempting any deletes.
 do_clear_table(Table, Config) ->
     do_clear_table(Table, Config, #{}).
 
 do_clear_table(Table, Config, FailureCounts) ->
-    case erlcloud_ddb2:scan(Table, [], Config) of
+    case scan_all(Table, Config) of
         {error, Reason} ->
             {error, Reason};
         {ok, []} ->
@@ -115,6 +120,26 @@ do_clear_table(Table, Config, FailureCounts) ->
             case delete_items(Items, Table, Config, FailureCounts) of
                 {ok, NewCounts}  -> do_clear_table(Table, Config, NewCounts);
                 {error, _} = Err -> Err
+            end
+    end.
+
+scan_all(Table, Config) ->
+    scan_all(Table, Config, undefined, []).
+
+scan_all(Table, Config, StartKey, Acc) ->
+    Opts = [{out, record}] ++ case StartKey of
+        undefined -> [];
+        Key       -> [{exclusive_start_key, Key}]
+    end,
+    case erlcloud_ddb2:scan(Table, Opts, Config) of
+        {error, Reason} ->
+            {error, Reason};
+        {ok, #ddb2_scan{items = PageItems, last_evaluated_key = NextKey}} ->
+            Items  = case PageItems of undefined -> []; _ -> PageItems end,
+            NewAcc = Acc ++ Items,
+            case NextKey of
+                undefined -> {ok, NewAcc};
+                _         -> scan_all(Table, Config, NextKey, NewAcc)
             end
     end.
 
