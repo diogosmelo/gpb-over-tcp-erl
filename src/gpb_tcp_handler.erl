@@ -17,7 +17,7 @@ activate(Pid) ->
 
 init([Socket]) ->
     % buffer: accumulates bytes across TCP deliveries until we have a complete frame.
-    {ok, #{socket => Socket, buffer => <<>>, violations => 0}}.
+    {ok, #{socket => Socket, buffer => <<>>, violations => 0, should_stop => false}}.
 
 handle_cast(activate, State = #{socket := Socket}) ->
     ok = inet:setopts(Socket, [{active, once}]),
@@ -28,11 +28,11 @@ handle_cast(_Msg, State) ->
 handle_info({tcp, Socket, Data}, State = #{socket := Socket, buffer := Buffer}) ->
     NewBuffer = <<Buffer/binary, Data/binary>>,
     NewState  = parse_frames(NewBuffer, State),
-    case NewState of
-        #{violations := V} when V >= ?MAX_VIOLATIONS ->
-            io:format("[handler ~p] too many violations (~p), closing connection~n", [self(), V]),
+    case should_stop(NewState) of
+        true ->
+            log_stop_reason(NewState),
             {stop, normal, NewState};
-        _ ->
+        false ->
             ok = inet:setopts(Socket, [{active, once}]),
             {noreply, NewState}
     end;
@@ -55,6 +55,17 @@ terminate(_Reason, #{socket := Socket}) ->
     gen_tcp:close(Socket),
     ok.
 
+% Returns true when no more frames should be processed on this connection.
+should_stop(#{should_stop := true})                        -> true;
+should_stop(#{violations  := V}) when V >= ?MAX_VIOLATIONS -> true;
+should_stop(_)                                             -> false.
+
+log_stop_reason(#{violations := V}) when V >= ?MAX_VIOLATIONS ->
+    io:format("[handler ~p] too many violations (~p), closing connection~n", [self(), V]);
+log_stop_reason(#{should_stop := true}) ->
+    % send failure was already logged at the point it occurred
+    ok.
+
 % Recursively extract complete frames from the buffer.
 %
 % A frame is: <<Len:32/big, Payload:Len/binary>>
@@ -69,11 +80,9 @@ terminate(_Reason, #{socket := Socket}) ->
 parse_frames(<<Len:32/big, Rest/binary>>, State) when byte_size(Rest) >= Len ->
     <<Payload:Len/binary, Remaining/binary>> = Rest,
     NewState = dispatch(Payload, State),
-    case NewState of
-        #{violations := V} when V >= ?MAX_VIOLATIONS ->
-            NewState#{buffer => Remaining};
-        _ ->
-            parse_frames(Remaining, NewState#{buffer => Remaining})
+    case should_stop(NewState) of
+        true  -> NewState#{buffer => Remaining};
+        false -> parse_frames(Remaining, NewState#{buffer => Remaining})
     end;
 parse_frames(Incomplete, State) ->
     State#{buffer => Incomplete}.
@@ -82,11 +91,19 @@ parse_frames(Incomplete, State) ->
 dispatch(Payload, State = #{socket := Socket}) ->
     try kv_pb:decode_msg(Payload, req_envelope) of
         #req_envelope{type = 'SET_REQ', set_req = #set_request{payload = #data{key = Key, value = Value}}} ->
-            handle_set(Key, Value, Socket),
-            State;
+            case handle_set(Key, Value, Socket) of
+                ok              -> State;
+                {error, Reason} ->
+                    io:format("[handler ~p] send error after SET: ~p~n", [self(), Reason]),
+                    State#{should_stop => true}
+            end;
         #req_envelope{type = 'GET_REQ', get_req = #get_request{key = Key}} ->
-            handle_get(Key, Socket),
-            State;
+            case handle_get(Key, Socket) of
+                ok              -> State;
+                {error, Reason} ->
+                    io:format("[handler ~p] send error after GET: ~p~n", [self(), Reason]),
+                    State#{should_stop => true}
+            end;
         #req_envelope{type = Type} ->
             io:format("[handler ~p] unexpected message type: ~p~n", [self(), Type]),
             bump_violations(State)
