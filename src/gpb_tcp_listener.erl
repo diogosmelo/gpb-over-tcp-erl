@@ -5,16 +5,26 @@
 -export([start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--define(PORT, 1337).
-
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 init([]) ->
-    {ok, Listen} = gen_tcp:listen(?PORT, [binary, {active, false}, {reuseaddr, true}]),
-    io:format("[listener] started on port ~p~n", [?PORT]),
-    self() ! accept,
-    {ok, #{listen => Listen}}.
+    case gpb_env:read_env(["TCP_PORT"]) of
+        {error, Reason} ->
+            {stop, Reason};
+        {ok, Env} ->
+            PortStr = maps:get("TCP_PORT", Env),
+            try list_to_integer(PortStr) of
+                Port ->
+                    {ok, Listen} = gen_tcp:listen(Port, [binary, {active, false}, {reuseaddr, true}]),
+                    io:format("[listener] started on port ~p~n", [Port]),
+                    self() ! accept,
+                    {ok, #{listen => Listen}}
+            catch
+                error:badarg ->
+                    {stop, {invalid_env, "TCP_PORT", PortStr}}
+            end
+    end.
 
 handle_info(accept, State = #{listen := Listen}) ->
     case gen_tcp:accept(Listen, 1000) of
